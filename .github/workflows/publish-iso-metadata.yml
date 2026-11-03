@@ -1,0 +1,83 @@
+name: Publish NanoOS ISO release metadata
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch-release:
+    name: Notify NanoRepo and NanoOS website
+    if: github.event.action == 'published'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate and build release payload
+        env:
+          RELEASE_JSON: ${{ toJSON(github.event.release) }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$RELEASE_JSON" | jq -e '
+            (.tag_name | type == "string" and length > 0) and
+            (.html_url | type == "string" and startswith("https://github.com/")) and
+            (.published_at | type == "string") and
+            (.assets | type == "array" and length > 0) and
+            any(.assets[]; (.name | test("\\.iso($|\\.part-[0-9]+$)"; "i")))
+          ' >/dev/null
+
+          printf '%s' "$RELEASE_JSON" | jq --arg source "$SOURCE_REPOSITORY" '{
+            event_type: "nanoos.iso.published",
+            client_payload: {
+              source_repo: $source,
+              release_tag: .tag_name,
+              release_name: (.name // .tag_name),
+              release_url: .html_url,
+              published_at: .published_at,
+              prerelease: .prerelease,
+              assets: [.assets[] | {
+                name: .name,
+                browser_download_url: .browser_download_url,
+                size: .size
+              }]
+            }
+          }' > "$RUNNER_TEMP/nanoos-iso-event.json"
+
+          echo "Prepared release event for $(jq -r '.client_payload.release_tag' "$RUNNER_TEMP/nanoos-iso-event.json")."
+
+      - name: Dispatch metadata to NanoOS website
+        env:
+          GH_TOKEN: ${{ secrets.NANOOS_WEBSITE_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN" || {
+            echo "::error::Missing NANOOS_WEBSITE_DISPATCH_TOKEN."
+            exit 1
+          }
+
+          curl --fail-with-body --silent --show-error \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            https://api.github.com/repos/falconediz911-stack/nanoos-website/dispatches \
+            --data-binary @"$RUNNER_TEMP/nanoos-iso-event.json"
+
+      - name: Dispatch release event to NanoRepo
+        env:
+          GH_TOKEN: ${{ secrets.NANOREPO_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN" || {
+            echo "::error::Missing NANOREPO_DISPATCH_TOKEN."
+            exit 1
+          }
+
+          curl --fail-with-body --silent --show-error \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            https://api.github.com/repos/falconediz911-stack/NanoRepo/dispatches \
+            --data-binary @"$RUNNER_TEMP/nanoos-iso-event.json"
